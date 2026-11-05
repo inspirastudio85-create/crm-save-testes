@@ -1,0 +1,95 @@
+UPDATE 1 — INTEGRAÇÃO COM O AGENTE DE WHATSAPP (n8n)
+Data: 05/11/2026
+
+O que tem nesta pasta
+---------------------
+- index.html                         -> o sistema já com o update (o original em CRM\ERP continua intacto)
+- n8n\01-criar-tabela.sql            -> cria a tabela da fila no Postgres
+- n8n\02-workflow-fila-nucleo.json   -> workflow para importar no n8n
+- LEIA-ME.txt                        -> este arquivo
+
+Como funciona
+-------------
+O CRM roda no navegador e não tem servidor, então o n8n não consegue "entrar" nele.
+Por isso existe uma fila no meio:
+
+  Agente WhatsApp (n8n) --POST--> fila (Postgres) <--GET a cada 5 s-- CRM no navegador
+
+1. O agente manda um evento para o webhook "nucleo-evento".
+2. O evento fica gravado na tabela nucleo_eventos, com um número crescente (seq).
+3. O CRM pergunta a cada X segundos: "tem algo depois do número N?".
+4. O CRM aplica os eventos e atualiza a tela na hora: funil, painel, contatos e tarefas.
+
+O agente SÓ alimenta o CRM. Os tipos aceitos são:
+  contato, interacao, negocio, etapa, tarefa
+Qualquer outro tipo (venda, orçamento, compra, produto, estoque, financeiro) é recusado
+duas vezes: no n8n e também dentro do CRM.
+
+Passo a passo no n8n
+--------------------
+1. No Postgres (pode ser o do Supabase), rode o arquivo 01-criar-tabela.sql.
+2. No n8n: Workflows > Import from file > 02-workflow-fila-nucleo.json.
+3. Abra os dois nós "Postgres" e escolha a sua credencial.
+4. Nos dois nós "Code" (Validar eventos e Conferir token), troque 'TROQUE-ESTE-TOKEN'
+   por um token seu. Tem que ser o mesmo nos dois.
+5. Ative o workflow. Copie a URL de produção do webhook "CRM busca a fila"
+   (algo como https://seu-n8n.com/webhook/nucleo-fila).
+6. No CRM: menu "Agente WhatsApp" > cole a URL e o token > marque "Ligar recebimento
+   automático" > Salvar e conectar. O indicador "Agente ao vivo" aparece no topo.
+
+Como o agente envia os eventos
+------------------------------
+No workflow do agente, use um nó "HTTP Request" (ou o "HTTP Request Tool", se quiser que
+a própria IA decida quando chamar):
+
+  Método: POST
+  URL:    https://seu-n8n.com/webhook/nucleo-evento
+  Header: x-nucleo-token: SEU-TOKEN
+  Corpo (JSON): um evento, uma lista, ou {"eventos":[...]}
+
+Formato de um evento:
+  {
+    "id": "id-unico-do-evento",    (recomendado: id da mensagem + tipo; evita duplicar)
+    "tipo": "negocio",
+    "dados": { ... }
+  }
+
+O contato é sempre encontrado pelo campo "fone" (aceita 5511988887777, (11) 98888-7777,
+com ou sem o 9º dígito) ou pelo "email". Se não existir, o CRM cria o contato.
+
+Campos por tipo
+---------------
+contato:   fone*, nome, empresa, email, cidade, cargo, seg, origem, tags, obs, resp, categoria
+           (Cliente/Fornecedor/Parceiro). Campos já preenchidos no CRM não são trocados,
+           a não ser que você mande "sobrescrever": true.
+interacao: fone*, texto* (ou resumo), canal (padrão: WhatsApp), quando (data/hora ISO)
+negocio:   fone* (ou ref), titulo, valor, etapa, prob, prev (AAAA-MM-DD), obs, resp, ref, novo
+           - Sem "ref", atualiza o negócio em aberto mais recente do contato; se não houver, cria.
+           - "ref": sua própria chave do negócio (ex.: id da conversa). Com ela, o CRM sempre
+             acha o mesmo negócio.
+           - "novo": true força criar outro negócio para o mesmo contato.
+etapa:     igual ao negocio; normalmente só fone + etapa (+ motivo, se for "Perdido").
+           Etapas válidas = as de Configurações + Ganho e Perdido. Maiúsculas não importam.
+tarefa:    titulo*, fone, data (AAAA-MM-DD), hora (HH:MM), prio (Alta/Média/Baixa),
+           tipo (Follow-up/Ligação/Reunião/E-mail/Visita/Interno), obs, resp
+(* obrigatório)
+
+Exemplo, quando o lead pede orçamento:
+  {"id":"wamid.123-neg","tipo":"negocio","dados":{"fone":"5511988887777","nome":"Maria",
+   "titulo":"Kit Premium","valor":1500,"etapa":"Proposta","obs":"Pediu preço do kit"}}
+
+Testar sem o n8n
+----------------
+Na tela "Agente WhatsApp" tem a área "Testar sem o n8n", com exemplos prontos.
+Ela aplica os eventos do mesmo jeito que a fila.
+
+Limitações conhecidas
+---------------------
+- A atualização é "quase ao vivo": vem no intervalo escolhido (mínimo 2 s, padrão 5 s).
+- O CRM só recebe eventos quando está aberto. Ao abrir de novo, ele busca tudo o que
+  ficou na fila desde a última vez (até 200 por consulta, depois continua).
+- Os dados continuam salvos só neste navegador. Em outro computador, a fila é lida de
+  novo do zero (os ids evitam duplicar dentro do mesmo navegador).
+- Se o token estiver errado, o n8n responde com erro 500 (o CRM mostra "sem conexão").
+- O workflow do n8n foi escrito à mão e NÃO foi testado num n8n real. Confira os nós
+  depois de importar.
